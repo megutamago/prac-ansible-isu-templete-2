@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
+	"crypto/sha512"
 	"fmt"
 	"html/template"
 	"io"
@@ -9,7 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
+
+	//"os/exec"
 	"path"
 	"regexp"
 	"strconv"
@@ -18,12 +21,12 @@ import (
 
 	"github.com/bradfitz/gomemcache/memcache"
 	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
-	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
-
-	_ "net/http/pprof"
+	goji "goji.io"
+	"goji.io/pat"
+	"goji.io/pattern"
 )
 
 var (
@@ -119,14 +122,7 @@ func escapeshellarg(arg string) string {
 }
 
 func digest(src string) string {
-	// opensslのバージョンによっては (stdin)= というのがつくので取る
-	out, err := exec.Command("/bin/bash", "-c", `printf "%s" `+escapeshellarg(src)+` | openssl dgst -sha512 | sed 's/^.*= //'`).Output()
-	if err != nil {
-		log.Print(err)
-		return ""
-	}
-
-	return strings.TrimSuffix(string(out), "\n")
+	return fmt.Sprintf("%x", sha512.Sum512([]byte(src)))
 }
 
 func calculateSalt(accountName string) string {
@@ -182,7 +178,19 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 			return nil, err
 		}
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
+		query := "SELECT " +
+			"c.id AS `id`," +
+			"c.post_id AS `post_id`," +
+			"c.user_id AS `user_id`," +
+			"c.comment AS `comment`," +
+			"c.created_at AS `created_at`," +
+			"u.id AS `user.id`, " +
+			"u.account_name AS `user.account_name`, " +
+			"u.passhash AS `user.passhash`, " +
+			"u.authority AS `user.authority`, " +
+			"u.del_flg AS `user.del_flg`, " +
+			"u.created_at AS `user.created_at` " +
+			"FROM `comments` c JOIN `users` u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at DESC"
 		if !allComments {
 			query += " LIMIT 3"
 		}
@@ -192,24 +200,12 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 			return nil, err
 		}
 
-		for i := 0; i < len(comments); i++ {
-			err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if err != nil {
-				return nil, err
-			}
-		}
-
 		// reverse
 		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
 			comments[i], comments[j] = comments[j], comments[i]
 		}
 
 		p.Comments = comments
-
-		err = db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if err != nil {
-			return nil, err
-		}
 
 		p.CSRFToken = csrfToken
 
@@ -388,12 +384,21 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.Select(&results,
-		"SELECT p.id, p.user_id, p.body, p.mime, p.created_at FROM `posts` AS p"+" "+
-		"JOIN `users` AS u ON (p.user_id=u.id)"+" "+
-		"WHERE u.del_flg = 0"+" "+
-		"ORDER BY p.created_at DESC LIMIT 20")
-
+	err := db.Select(&results, "SELECT STRAIGHT_JOIN "+
+		"p.id AS `id`,"+
+		"p.user_id AS `user_id`,"+
+		"p.body AS `body`,"+
+		"p.mime AS `mime`,"+
+		"p.created_at AS `created_at`, "+
+		"u.id AS `user.id`, "+
+		"u.account_name AS `user.account_name`, "+
+		"u.passhash AS `user.passhash`, "+
+		"u.authority AS `user.authority`, "+
+		"u.del_flg AS `user.del_flg`, "+
+		"u.created_at AS `user.created_at` "+
+		"FROM `posts` p JOIN `users` u ON p.user_id = u.id "+
+		"WHERE u.del_flg = 0 "+
+		"ORDER BY p.created_at DESC LIMIT ?", postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -423,7 +428,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func getAccountName(w http.ResponseWriter, r *http.Request) {
-	accountName := chi.URLParam(r, "accountName")
+	accountName := pat.Param(r, "accountName")
 	user := User{}
 
 	err := db.Get(&user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0", accountName)
@@ -439,7 +444,19 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	err = db.Select(&results, "SELECT STRAIGHT_JOIN "+
+		"p.id AS `id`,"+
+		"p.user_id AS `user_id`,"+
+		"p.body AS `body`,"+
+		"p.mime AS `mime`,"+
+		"p.created_at AS `created_at`, "+
+		"u.id AS `user.id`, "+
+		"u.account_name AS `user.account_name`, "+
+		"u.passhash AS `user.passhash`, "+
+		"u.authority AS `user.authority`, "+
+		"u.del_flg AS `user.del_flg`, "+
+		"u.created_at AS `user.created_at` "+
+		"FROM `posts` p JOIN `users` u ON p.user_id = u.id WHERE p.user_id = ?  AND u.del_flg = 0 ORDER BY p.created_at DESC LIMIT ?", user.ID, postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -527,7 +544,19 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+	err = db.Select(&results, "SELECT STRAIGHT_JOIN "+
+		"p.id AS `id`,"+
+		"p.user_id AS `user_id`,"+
+		"p.body AS `body`,"+
+		"p.mime AS `mime`,"+
+		"p.created_at AS `created_at`, "+
+		"u.id AS `user.id`, "+
+		"u.account_name AS `user.account_name`, "+
+		"u.passhash AS `user.passhash`, "+
+		"u.authority AS `user.authority`, "+
+		"u.del_flg AS `user.del_flg`, "+
+		"u.created_at AS `user.created_at` "+
+		"FROM `posts` p JOIN `users` u ON p.user_id = u.id WHERE p.created_at <= ? AND u.del_flg = 0 ORDER BY p.created_at DESC LIMIT ?", t.Format(ISO8601Format), postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -555,7 +584,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 }
 
 func getPostsID(w http.ResponseWriter, r *http.Request) {
-	pidStr := chi.URLParam(r, "id")
+	pidStr := pat.Param(r, "id")
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -563,7 +592,19 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	err = db.Select(&results, "SELECT STRAIGHT_JOIN "+
+		"p.id AS `id`,"+
+		"p.user_id AS `user_id`,"+
+		"p.body AS `body`,"+
+		"p.mime AS `mime`,"+
+		"p.created_at AS `created_at`, "+
+		"u.id AS `user.id`, "+
+		"u.account_name AS `user.account_name`, "+
+		"u.passhash AS `user.passhash`, "+
+		"u.authority AS `user.authority`, "+
+		"u.del_flg AS `user.del_flg`, "+
+		"u.created_at AS `user.created_at` "+
+		"FROM `posts` p JOIN `users` u ON p.user_id = u.id WHERE p.id = ? AND u.del_flg = 0 LIMIT ?", pid, postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
@@ -677,8 +718,35 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
 
+func imagePath(id int, mime string) string {
+	var ext string
+	switch mime {
+	case "image/jpeg":
+		ext = ".jpg"
+	case "image/png":
+		ext = ".png"
+	case "image/gif":
+		ext = ".gif"
+	}
+	var b strings.Builder
+	b.WriteString("/home/isucon/private_isu/webapp/public/image/")
+	b.WriteString(strconv.Itoa(id))
+	b.WriteString(ext)
+	return b.String()
+}
+
+func writeImage(id int, mime string, data []byte) {
+	fn := imagePath(id, mime)
+	f, err := os.OpenFile(fn, os.O_WRONLY|os.O_CREATE, 0666)
+	if err != nil {
+		panic(err)
+	}
+	f.Write(data)
+	f.Close()
+}
+
 func getImage(w http.ResponseWriter, r *http.Request) {
-	pidStr := chi.URLParam(r, "id")
+	pidStr := pat.Param(r, "id")
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -692,11 +760,12 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ext := chi.URLParam(r, "ext")
+	ext := pat.Param(r, "ext")
 
 	if ext == "jpg" && post.Mime == "image/jpeg" ||
 		ext == "png" && post.Mime == "image/png" ||
 		ext == "gif" && post.Mime == "image/gif" {
+		writeImage(pid, post.Mime, post.Imgdata)
 		w.Header().Set("Content-Type", post.Mime)
 		_, err := w.Write(post.Imgdata)
 		if err != nil {
@@ -798,11 +867,32 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
-func main() {
-    go func() {
-        log.Println(http.ListenAndServe("localhost:6060", nil))
-    }()
+type RegexpPattern struct {
+	regexp *regexp.Regexp
+}
 
+func Regexp(reg *regexp.Regexp) *RegexpPattern {
+	return &RegexpPattern{regexp: reg}
+}
+
+func (reg *RegexpPattern) Match(r *http.Request) *http.Request {
+	ctx := r.Context()
+	uPath := pattern.Path(ctx)
+	if reg.regexp.MatchString(uPath) {
+		values := reg.regexp.FindStringSubmatch(uPath)
+		keys := reg.regexp.SubexpNames()
+
+		for i := 1; i < len(keys); i++ {
+			ctx = context.WithValue(ctx, pattern.Variable(keys[i]), values[i])
+		}
+
+		return r.WithContext(ctx)
+	}
+
+	return nil
+}
+
+func main() {
 	host := os.Getenv("ISUCONP_DB_HOST")
 	if host == "" {
 		host = "localhost"
@@ -826,7 +916,7 @@ func main() {
 	}
 
 	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local",
+		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local&interpolateParams=true",
 		user,
 		password,
 		host,
@@ -838,28 +928,28 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
 	defer db.Close()
 
-	r := chi.NewRouter()
+	mux := goji.NewMux()
 
-	r.Get("/initialize", getInitialize)
-	r.Get("/login", getLogin)
-	r.Post("/login", postLogin)
-	r.Get("/register", getRegister)
-	r.Post("/register", postRegister)
-	r.Get("/logout", getLogout)
-	r.Get("/", getIndex)
-	r.Get("/posts", getPosts)
-	r.Get("/posts/{id}", getPostsID)
-	r.Post("/", postIndex)
-	r.Get("/image/{id}.{ext}", getImage)
-	r.Post("/comment", postComment)
-	r.Get("/admin/banned", getAdminBanned)
-	r.Post("/admin/banned", postAdminBanned)
-	r.Get(`/@{accountName:[a-zA-Z]+}`, getAccountName)
-	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
-		http.FileServer(http.Dir("../public")).ServeHTTP(w, r)
-	})
+	mux.HandleFunc(pat.Get("/initialize"), getInitialize)
+	mux.HandleFunc(pat.Get("/login"), getLogin)
+	mux.HandleFunc(pat.Post("/login"), postLogin)
+	mux.HandleFunc(pat.Get("/register"), getRegister)
+	mux.HandleFunc(pat.Post("/register"), postRegister)
+	mux.HandleFunc(pat.Get("/logout"), getLogout)
+	mux.HandleFunc(pat.Get("/"), getIndex)
+	mux.HandleFunc(pat.Get("/posts"), getPosts)
+	mux.HandleFunc(pat.Get("/posts/:id"), getPostsID)
+	mux.HandleFunc(pat.Post("/"), postIndex)
+	mux.HandleFunc(pat.Get("/image/:id.:ext"), getImage)
+	mux.HandleFunc(pat.Post("/comment"), postComment)
+	mux.HandleFunc(pat.Get("/admin/banned"), getAdminBanned)
+	mux.HandleFunc(pat.Post("/admin/banned"), postAdminBanned)
+	mux.HandleFunc(Regexp(regexp.MustCompile(`^/@(?P<accountName>[a-zA-Z]+)$`)), getAccountName)
+	mux.Handle(pat.Get("/*"), http.FileServer(http.Dir("../public")))
 
-	log.Fatal(http.ListenAndServe(":8080", r))
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }
