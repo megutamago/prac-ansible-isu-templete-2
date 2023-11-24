@@ -17,7 +17,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ vars.HOST1 }}
-          username: ubuntu
+          username: isucon
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
@@ -35,7 +35,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ vars.HOST_BENCH }}
-          username: ubuntu
+          username: isucon
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
@@ -53,7 +53,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ vars.HOST1 }}
-          username: ubuntu
+          username: isucon
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
@@ -64,7 +64,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ vars.HOST1 }}
-          username: ubuntu
+          username: isucon
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
